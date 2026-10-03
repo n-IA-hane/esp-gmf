@@ -107,6 +107,35 @@
 - Unified Event Interface: Notifies events (wake-up start/end, VAD state changes, command word triggers) via callback functions
 - State Machine Management: Automatically maintains transitions between wake-up, speech, and silence states
 
+### External realtime PCM consumers
+
+The normal pipeline output is drained by the input processing job. An external
+consumer with its own audio clock may need processed samples as soon as the AFE
+fetch task receives them, even while that job is waiting for another input block.
+
+For this case, set `delay_samples` to zero and call
+`esp_gmf_afe_set_output_callback(element, callback, context)` on the element
+instance before opening it. The callback replaces normal output-port delivery;
+do not connect a downstream pipeline consumer in this mode. Wake-up, VAD and
+command event monitoring still run before PCM delivery. No additional task or
+output data bus is created.
+
+The callback runs on the existing AFE fetch task. Its PCM pointer is borrowed
+only until it returns, so copy retained data into a bounded nonblocking queue.
+Do not block, replace manager callbacks, or synchronously close/destroy the
+pipeline from this callback. Normal close detaches the manager callback under
+its existing lock before releasing the element's resources.
+
+Binding after open, or requesting direct output with a nonzero sample delay,
+returns `ESP_GMF_ERR_INVALID_ARG`. A null callback retains normal pipeline output.
+Bind each element instance separately; object cloning does not copy this binding.
+
+Run the host delivery-contract regression with:
+
+```sh
+python3 elements/gmf_ai_audio/test_apps/host/test_afe_external_output.py
+```
+
 ### System Diagram
 
   ```mermaid

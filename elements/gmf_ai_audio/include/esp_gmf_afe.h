@@ -69,6 +69,21 @@ typedef struct {
  */
 typedef void (*esp_gmf_afe_event_cb_t)(esp_gmf_element_handle_t el, esp_gmf_afe_evt_t *event, void *user_data);
 
+/** Optional realtime PCM output, called from the existing AFE fetch task.
+ * Data is borrowed only for the duration of this callback. The callback must
+ * copy what it retains. It must not block, replace manager callbacks, or close
+ * or destroy the pipeline synchronously.
+ */
+typedef void (*esp_gmf_afe_output_cb_t)(const int16_t *data, size_t bytes, void *ctx);
+
+/** Bind before opening the element. NULL selects the normal pipeline output.
+ * Direct output requires delay_samples == 0 and bypasses the output data bus.
+ * Event monitoring remains active; close waits for the manager callback lock.
+ */
+esp_gmf_err_t esp_gmf_afe_set_output_callback(esp_gmf_element_handle_t handle,
+    esp_gmf_afe_output_cb_t callback, void *ctx);
+
+
 /**
  * @brief  Configuration structure for GMF AFE wrapper
  */
