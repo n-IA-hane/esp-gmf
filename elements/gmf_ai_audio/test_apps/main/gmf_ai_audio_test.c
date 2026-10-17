@@ -16,6 +16,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_bit_defs.h"
+#include "esp_memory_utils.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 
@@ -30,9 +31,10 @@
 #include "esp_gmf_wn.h"
 #include "esp_gmf_vad.h"
 #include "esp_gmf_ns.h"
+#include "esp_gmf_ai_audio_helper.h"
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 #include "esp_gmf_doa.h"
-#endif  /* DOA supported targets */
+#endif  /* defined(CONFIG_IDF_TARGET_ESP32S3) */
 #if defined(CONFIG_IDF_TARGET_ESP32) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32P4)
 #include "esp_afe_config.h"
 #include "esp_gmf_afe_manager.h"
@@ -446,6 +448,66 @@ TEST_CASE("Test gmf afe manager result_cb from create config", "[ESP_GMF_AFE_MAN
     afe_manager = NULL;
     afe_config_free(afe_cfg);
     afe_cfg = NULL;
+    esp_srmodel_deinit(models);
+}
+
+typedef struct {
+    EventGroupHandle_t  events;
+    bool                feed_internal;
+    bool                fetch_internal;
+} afe_stack_test_ctx_t;
+
+static int32_t afe_stack_test_read(void *buffer, int buf_sz, void *user_ctx, uint32_t ticks)
+{
+    afe_stack_test_ctx_t *ctx = user_ctx;
+    char stack_byte;
+    xEventGroupSetBits(ctx->events, BIT0 | (esp_ptr_internal(&stack_byte) != ctx->feed_internal ? BIT2 : 0));
+    return afe_manager_config_read_cb(buffer, buf_sz, NULL, ticks);
+}
+
+static void afe_stack_test_result(afe_fetch_result_t *result, void *user_ctx)
+{
+    (void)result;
+    afe_stack_test_ctx_t *ctx = user_ctx;
+    char stack_byte;
+    xEventGroupSetBits(ctx->events, BIT1 | (esp_ptr_internal(&stack_byte) != ctx->fetch_internal ? BIT2 : 0));
+}
+
+TEST_CASE("Test gmf afe manager task stack memory", "[ESP_GMF_AFE_MANAGER][leaks=1400]")
+{
+    srmodel_list_t *models = esp_srmodel_init("model");
+    afe_config_t *afe_cfg = afe_config_init("MR", models, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
+    TEST_ASSERT_NOT_NULL(afe_cfg);
+    afe_cfg->wakenet_init = false;
+    afe_stack_test_ctx_t ctx = {.events = xEventGroupCreate()};
+    TEST_ASSERT_NOT_NULL(ctx.events);
+
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        esp_gmf_afe_manager_cfg_t cfg = DEFAULT_GMF_AFE_MANAGER_CFG(
+            afe_cfg, afe_stack_test_read, &ctx, afe_stack_test_result, &ctx);
+        TEST_ASSERT_FALSE(cfg.feed_task_setting.stack_in_internal);
+        TEST_ASSERT_FALSE(cfg.fetch_task_setting.stack_in_internal);
+        cfg.feed_task_setting.stack_in_internal = (mode & 1) != 0;
+        cfg.fetch_task_setting.stack_in_internal = (mode & 2) != 0;
+#if (configSUPPORT_STATIC_ALLOCATION == 1) && defined(CONFIG_SPIRAM_BOOT_INIT)
+        ctx.feed_internal = cfg.feed_task_setting.stack_in_internal;
+        ctx.fetch_internal = cfg.fetch_task_setting.stack_in_internal;
+#else
+        ctx.feed_internal  = true;
+        ctx.fetch_internal = true;
+#endif  /* (configSUPPORT_STATIC_ALLOCATION == 1) && defined(CONFIG_SPIRAM_BOOT_INIT) */
+        xEventGroupClearBits(ctx.events, BIT0 | BIT1 | BIT2);
+        esp_gmf_afe_manager_handle_t manager = NULL;
+        TEST_ASSERT_EQUAL(ESP_GMF_ERR_OK, esp_gmf_afe_manager_create(&cfg, &manager));
+        EventBits_t bits = xEventGroupWaitBits(ctx.events, BIT0 | BIT1, false, true, pdMS_TO_TICKS(5000));
+        TEST_ASSERT_EQUAL(ESP_GMF_ERR_OK, esp_gmf_afe_manager_destroy(manager));
+        bits |= xEventGroupGetBits(ctx.events);
+        TEST_ASSERT_EQUAL(BIT0 | BIT1, bits & (BIT0 | BIT1));
+        TEST_ASSERT_EQUAL(0, bits & BIT2);
+    }
+
+    vEventGroupDelete(ctx.events);
+    afe_config_free(afe_cfg);
     esp_srmodel_deinit(models);
 }
 
@@ -1053,4 +1115,72 @@ TEST_CASE("Test gmf wakenet process", "[ESP_GMF_WN][leaks=1400]")
     esp_srmodel_deinit(models);
     vEventGroupDelete(g_event_group);
     g_event_group = NULL;
+}
+
+static void assert_layout_label_sr_format(const char *label, const char *expect)
+{
+    char sr_format[ESP_GMF_AI_AUDIO_SR_FORMAT_MAX_CH + 1];
+    memset(sr_format, 'X', sizeof(sr_format));
+    TEST_ASSERT_EQUAL(ESP_GMF_ERR_OK,
+                      esp_gmf_ai_audio_ch_layout_to_sr_format(label, sr_format, sizeof(sr_format)));
+    TEST_ASSERT_EQUAL_STRING(expect, sr_format);
+}
+
+TEST_CASE("Convert codec data layout label to SR input format", "[ESP_GMF_AI_AUDIO]")
+{
+    assert_layout_label_sr_format("FL,FL,RE", "MMR");
+    assert_layout_label_sr_format("FL,NA,RE", "MNR");
+    assert_layout_label_sr_format("FL,FR,SL,SR", "MMMM");
+    assert_layout_label_sr_format("FL,FL,NA,FL", "MMNM");
+    assert_layout_label_sr_format("RE,FL", "RM");
+    assert_layout_label_sr_format("FL,FR,RE,NA", "MMRN");
+    assert_layout_label_sr_format("FL,RE,FR,NA", "MRMN");
+    assert_layout_label_sr_format("RE,FL,NA,FR", "RMNM");
+    assert_layout_label_sr_format("FL,FR,SL,SR,RE,NA", "MMMMRN");
+    assert_layout_label_sr_format("FL, NA, RE", "MNR");
+    assert_layout_label_sr_format("FC,BL,BR", "MMM");
+    assert_layout_label_sr_format("FL,FR,SL,SR,BL,BR,RE,NA", "MMMMMMRN");
+    assert_layout_label_sr_format("NA,NA", "NN");
+
+    char exact[4];
+    TEST_ASSERT_EQUAL(ESP_GMF_ERR_OK, esp_gmf_ai_audio_ch_layout_to_sr_format("FL,RE,FR", exact, sizeof(exact)));
+    TEST_ASSERT_EQUAL_STRING("MRM", exact);
+
+    char too_small[4];
+    memset(too_small, 'A', sizeof(too_small));
+    TEST_ASSERT_EQUAL(ESP_GMF_ERR_NOT_ENOUGH, esp_gmf_ai_audio_ch_layout_to_sr_format("FL,RE,FR", too_small, 3));
+    TEST_ASSERT_EQUAL_MEMORY("AAAA", too_small, sizeof(too_small));
+
+    static const char *const invalid_labels[] = {
+        "NF",
+        "N/A",
+        "na",
+        "Na",
+        "fl",
+        "MIC1",
+        "FL,na,RE",
+        "FL, ,RE",
+        "FL,",
+        "FL,,RE",
+        "FL,FR,SL,SR,BL,BR,RE,NA,FC",
+        "ABCDEFGHIJKLMNOP",
+    };
+    for (size_t i = 0; i < sizeof(invalid_labels) / sizeof(invalid_labels[0]); i++) {
+        char unchanged[8];
+        memset(unchanged, 'Z', sizeof(unchanged));
+        TEST_ASSERT_EQUAL(ESP_GMF_ERR_INVALID_ARG,
+                          esp_gmf_ai_audio_ch_layout_to_sr_format(invalid_labels[i], unchanged, sizeof(unchanged)));
+        for (size_t j = 0; j < sizeof(unchanged); j++) {
+            TEST_ASSERT_EQUAL_CHAR('Z', unchanged[j]);
+        }
+    }
+
+    char buf[8];
+    memset(buf, 'Z', sizeof(buf));
+    TEST_ASSERT_EQUAL(ESP_GMF_ERR_INVALID_ARG, esp_gmf_ai_audio_ch_layout_to_sr_format(NULL, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL(ESP_GMF_ERR_INVALID_ARG, esp_gmf_ai_audio_ch_layout_to_sr_format("", buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL(ESP_GMF_ERR_INVALID_ARG, esp_gmf_ai_audio_ch_layout_to_sr_format("FL,RE", NULL, sizeof(buf)));
+    for (size_t j = 0; j < sizeof(buf); j++) {
+        TEST_ASSERT_EQUAL_CHAR('Z', buf[j]);
+    }
 }

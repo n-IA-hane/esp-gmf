@@ -197,21 +197,13 @@ esp_gmf_err_t esp_gmf_afe_manager_create(esp_gmf_afe_manager_cfg_t *cfg, esp_gmf
     }
 
 #if (configSUPPORT_STATIC_ALLOCATION == 1) && defined(CONFIG_SPIRAM_BOOT_INIT)
-#if CONFIG_IDF_TARGET_ESP32P4
-    // P4 commonly executes code from PSRAM while display and media streams
-    // exercise the same cache. Keep the realtime AFE bridge stacks internal;
-    // a delayed fetch here surfaces as one complete missing AFE frame.
-    const uint32_t afe_task_stack_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-#else
-    const uint32_t afe_task_stack_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-#endif
     prvTaskCreateDynamicPinnedToCoreWithCaps(feed_task,
                                              "afe_feed",
                                              cfg->feed_task_setting.stack_size,
                                              afe_manager,
                                              cfg->feed_task_setting.prio,
                                              cfg->feed_task_setting.core,
-                                             afe_task_stack_caps,
+                                             (cfg->feed_task_setting.stack_in_internal ? MALLOC_CAP_INTERNAL : MALLOC_CAP_SPIRAM) | MALLOC_CAP_8BIT,
                                              &afe_manager->feed.task);
     ESP_GOTO_ON_FALSE(afe_manager->feed.task, ESP_GMF_ERR_MEMORY_LACK, __err, TAG, "Create afe feed task failed");
 
@@ -221,7 +213,7 @@ esp_gmf_err_t esp_gmf_afe_manager_create(esp_gmf_afe_manager_cfg_t *cfg, esp_gmf
                                              afe_manager,
                                              cfg->fetch_task_setting.prio,
                                              cfg->fetch_task_setting.core,
-                                             afe_task_stack_caps,
+                                             (cfg->fetch_task_setting.stack_in_internal ? MALLOC_CAP_INTERNAL : MALLOC_CAP_SPIRAM) | MALLOC_CAP_8BIT,
                                              &afe_manager->fetch.task);
     ESP_GOTO_ON_FALSE(afe_manager->fetch.task, ESP_GMF_ERR_MEMORY_LACK, __err, TAG, "Create afe fetch task failed");
 #else

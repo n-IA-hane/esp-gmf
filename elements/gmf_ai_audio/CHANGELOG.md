@@ -1,5 +1,40 @@
 # Changelog
 
+## v1.1.1
+
+### Features
+
+- Added optional internal RAM allocation for AFE manager feed and fetch task stacks
+- Added `esp_gmf_ai_audio_ch_layout_to_sr_format()` to convert an ADC channel label list into the esp-sr `M`/`R`/`N` input format
+
+### Bug Fixes
+
+- Fixed `esp_gmf_afe_close` blocking on the `in_db` read until timeout
+
+## v1.1.0
+
+### Changes
+
+- Relaxed `esp-sr` dependency version from `2.5.3` to `2.5.*`
+
+## v1.0.2
+
+### Features
+
+- Upgrade `esp-sr` to version v2.5.3
+
+## v1.0.1~1
+
+### Changes
+
+- Changed dependency version constraints from `^` (automatic minor updates) to `~` (automatic patch updates) to improve compatibility
+
+## v1.0.1
+
+### Bug Fixes
+
+- Adapted `aec_rec` and `wwe` examples to esp_codec_dev 2.x channel config
+
 ## v1.0.0~1
 
 ### Docs
